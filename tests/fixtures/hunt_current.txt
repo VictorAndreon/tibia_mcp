@@ -1,0 +1,29 @@
+{{Infobox_Hunts|List={{{1|}}}|GetValue={{{GetValue|}}}
+| image              = Elf
+| city               = Ab'Dendriel
+| location           = Noroeste de [[Ab'Dendriel]]
+| mapa               = 32643,31617,7:1
+| premium            = não
+| dif                = 2
+| vocation           = Druid, Knight, Paladin, Sorcerer
+| lvl                = 25
+| loot               = 2
+| exp                = 2
+| raros              = Yellow Gem, Wand of Cosmic Energy
+| info               = 
+| implemented        = 6.2
+| infoLocal          = É uma pequena caverna localizada ao noroeste de Ab'Dendriel. Lá vive um grande número de elfos. É um pouco difícil encontrá-la, e será necessário um [[Machete]] para alcançá-la. Knights devem ser cuidadosos: Se você seguir um Elf Scout, há uma grande chance de atrair mais inimigos que poderão matá-lo facilmente.
+{{Clear}}
+| rotaLocal          = Há duas formas de chegar a esta cave, ambas requerem um [[Machete]].
+'''Pelo Norte:'''
+# Desça por {{Mapa|32646,31594,7:2|este}} buraco.
+# Há apenas um único caminho a seguir com dois [[Bat]]s. Você subirá {{Mapa|32627,31602,7:2|aqui}}.
+# Agora acesse a caverna {{Mapa|32643,31617,7:2|aqui}}. 
+
+'''Pelo Sul:'''
+# Você pode contornar o pântano {{Mapa|32617,31637,7:2|aqui}} e usar uma [[Machete]] para cortar a [[Jungle Grass]].
+# Agora acesse a caverna {{Mapa|32643,31617,7:2|aqui}}. 
+| questsLocal        = não
+| npcsLocal          = não
+| mountsLocal        = 
+}}

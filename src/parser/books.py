@@ -31,7 +31,7 @@ BOOL_FIELDS = {"translated"}
 CLEAN_FIELDS = {"location", "blurb", "related_pages", "notes"}
 
 
-def parse(page_id, content):
+def parse(page_id, content, title=None):
     raw = extract_infobox(content, TEMPLATE)
     if not raw:
         return None
@@ -51,6 +51,10 @@ def parse(page_id, content):
             record[col] = value.strip() if value else None
 
     # Use title as name fallback
+    # Many pages omit "name" and rely on the page title (e.g. most hunts)
+    if not record.get("name") and title:
+        record["name"] = title
+
     if "name" not in record or not record["name"]:
         record["name"] = record.get("title")
     if not record.get("name"):

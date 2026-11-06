@@ -40,7 +40,7 @@ INT_FIELDS = {"speed"}
 CLEAN_FIELDS = {"attrib", "method", "notes"}
 
 
-def parse(page_id, content):
+def parse(page_id, content, title=None):
     raw = extract_infobox(content, TEMPLATE)
     if not raw:
         return None
@@ -60,6 +60,10 @@ def parse(page_id, content):
             record[col] = clean_wikilinks(value) if value else None
         else:
             record[col] = value.strip() if value else None
+
+    # Many pages omit "name" and rely on the page title (e.g. most hunts)
+    if not record.get("name") and title:
+        record["name"] = title
 
     if "name" not in record or not record["name"]:
         return None

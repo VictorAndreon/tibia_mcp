@@ -1,0 +1,16 @@
+{{Infobox_Achievement|List={{{1|}}}|GetValue={{{GetValue|}}}
+| name             = A Friend in Need
+| identificador    = 550
+| status           = Conhecido
+| grau             = 1
+| pontos           = 2
+| obtivel          = 1
+| secreto          = sim
+| premium          = sim
+| implemented      = 13.40.54ea79
+| descrição        = Você libertou [[A Captive Forest Fury]] do [[Corym Black Market]]. Um amigo na necessidade é um amigo de verdade.
+<p><spoiler>
+* Obtido após libertar [[A Captive Forest Fury]] do [[Corym Black Market]] e receber a receita da [[Gingerbread Key]] na [[Threatened Dreams Quest#Sweet_Dreams_Quest|Sweet Dreams Quest]].
+</spoiler></p>
+| notes            = 
+}}

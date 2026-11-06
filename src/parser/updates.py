@@ -27,7 +27,7 @@ BOOL_FIELDS = {"update_season"}
 CLEAN_FIELDS = {"update_new", "update_changed", "update_fixed", "notes"}
 
 
-def parse(page_id, content):
+def parse(page_id, content, title=None):
     raw = extract_infobox(content, TEMPLATE)
     if not raw:
         return None
@@ -47,6 +47,10 @@ def parse(page_id, content):
             record[col] = value.strip() if value else None
 
     # Use update_version as name fallback
+    # Many pages omit "name" and rely on the page title (e.g. most hunts)
+    if not record.get("name") and title:
+        record["name"] = title
+
     if "name" not in record or not record["name"]:
         record["name"] = record.get("update_version")
     if not record.get("name"):

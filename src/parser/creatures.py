@@ -1,3 +1,5 @@
+import re
+
 from src.parser.wikitext import extract_infobox, parse_boolean, parse_int, parse_float, clean_wikilinks
 
 TEMPLATE = "Infobox_Criatura"
@@ -43,10 +45,13 @@ FIELD_MAP = {
     "pushobjects": "push_objects",
     "speed": "speed",
     "charmpoints": "charm_points",
+    "charm": "charm_points",
     "defense": "defense",
     "mitigation": "mitigation",
     "occurrence": "occurrence",
+    "ocorrencia": "occurrence",
     "difficulty": "difficulty",
+    "dificuldade": "difficulty",
     "maxdmg": "max_damage",
     "hab_fisico": "hab_physical",
     "hab_terra": "hab_earth",
@@ -67,6 +72,22 @@ FIELD_MAP = {
     "hab_embriaguez": "hab_drunk",
     "hab_paralisia": "hab_paralyze",
     "hab_antiarmadilha": "hab_antitrap",
+    # TibiaWiki renamed the hab_* fields to English
+    "hab_physical": "hab_physical",
+    "hab_earth": "hab_earth",
+    "hab_fire": "hab_fire",
+    "hab_death": "hab_death",
+    "hab_energy": "hab_energy",
+    "hab_holy": "hab_holy",
+    "hab_ice": "hab_ice",
+    "hab_lifedrain": "hab_lifedrain",
+    "hab_manadrain": "hab_manadrain",
+    "hab_drowning": "hab_drowning",
+    "hab_drunk": "hab_drunk",
+    "hab_paralyze": "hab_paralyze",
+    "hab_antitrap": "hab_antitrap",
+    "hab_invis": "hab_invisible",
+    "hab_invoca": "hab_summon",
     "physicalmod": "physical_mod",
     "earthmod": "earth_mod",
     "firemod": "fire_mod",
@@ -75,7 +96,17 @@ FIELD_MAP = {
     "holymod": "holy_mod",
     "icemod": "ice_mod",
     "healmod": "heal_mod",
+    # TibiaWiki renamed <element>mod to <element>DmgMod
+    "physicaldmgmod": "physical_mod",
+    "earthdmgmod": "earth_mod",
+    "firedmgmod": "fire_mod",
+    "deathdmgmod": "death_mod",
+    "energydmgmod": "energy_mod",
+    "holydmgmod": "holy_mod",
+    "icedmgmod": "ice_mod",
+    "healdmgmod": "heal_mod",
     "reflects": "reflects",
+    "reflete": "reflects",
     "immunities": "immunities",
     "ignoresfields": "ignores_fields",
     "implemented": "implemented",
@@ -84,12 +115,15 @@ FIELD_MAP = {
     "behavior": "behavior",
     "sounds": "sounds",
     "localizacaoraid": "location_raid",
+    "locationraid": "location_raid",
     "lootcomum": "loot_common",
     "lootincomum": "loot_uncommon",
     "lootsemiraro": "loot_semi_rare",
     "lootraro": "loot_rare",
     "lootmuitotraro": "loot_very_rare",
+    "lootmuitoraro": "loot_very_rare",
     "lootevento": "loot_event",
+    "lootevent": "loot_event",
     "lootraid": "loot_raid",
     "notas": "notes",
     "historico": "history",
@@ -107,7 +141,45 @@ CLEAN_FIELDS = {"loot_common", "loot_uncommon", "loot_semi_rare", "loot_rare",
                 "reflects", "ignores_fields", "sounds", "notes", "history"}
 
 
-def parse(page_id, content):
+LOOT_RARITY_RE = re.compile(r"\(\s*(muito raro|semi[- ]?raro|raro|incomum|comum|sempre)\s*\)", re.IGNORECASE)
+LOOT_RARITY_COLUMN = {
+    "muito raro": "loot_very_rare", "semi-raro": "loot_semi_rare", "semi raro": "loot_semi_rare",
+    "semiraro": "loot_semi_rare", "raro": "loot_rare", "incomum": "loot_uncommon",
+    "comum": "loot_common", "sempre": "loot_common",
+}
+LOOT_COLUMNS = ("loot_common", "loot_uncommon", "loot_semi_rare", "loot_rare", "loot_very_rare")
+
+
+def split_loot_by_rarity(text):
+    """Split the single "loot" field into the loot_* tier columns.
+
+    About half the creature pages list all loot in one field, marking the
+    rarity in parentheses: "[[Mini Mummy]] (muito raro)". Unmarked = common.
+    """
+    entries, current, depth = [], [], 0
+    for ch in text:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        if ch == "," and depth <= 0:
+            entries.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    entries.append("".join(current))
+
+    tiers = {}
+    for entry in entries:
+        match = LOOT_RARITY_RE.search(entry)
+        column = LOOT_RARITY_COLUMN[match.group(1).lower()] if match else "loot_common"
+        item = clean_wikilinks(LOOT_RARITY_RE.sub("", entry)).strip().rstrip(".").strip()
+        if item and item.lower() not in ("nenhum", "nada", "none"):
+            tiers.setdefault(column, []).append(item)
+    return {col: ", ".join(items) for col, items in tiers.items()}
+
+
+def parse(page_id, content, title=None):
     """Parse creature data from wikitext.
 
     Returns:
@@ -135,7 +207,14 @@ def parse(page_id, content):
         else:
             record[col] = value.strip() if value else None
 
+    if raw.get("loot") and not any(record.get(c) for c in LOOT_COLUMNS):
+        record.update(split_loot_by_rarity(raw["loot"]))
+
     # Ensure name is set
+    # Many pages omit "name" and rely on the page title (e.g. most hunts)
+    if not record.get("name") and title:
+        record["name"] = title
+
     if "name" not in record or not record["name"]:
         return None
 

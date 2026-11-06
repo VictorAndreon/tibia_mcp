@@ -6,8 +6,8 @@ import sys
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from src.parser.wikitext import extract_infobox, clean_wikilinks, parse_boolean, parse_int, parse_float, extract_map_coords
-from src.parser import creatures, items, mounts, books, buildings, worlds, runes, world_quests, familiars
+from src.parser.wikitext import extract_infobox, clean_wikilinks, parse_boolean, parse_int, parse_float, extract_map_coords, unmapped_fields
+from src.parser import creatures, items, mounts, books, buildings, worlds, runes, world_quests, familiars, hunts, achievements
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -345,3 +345,91 @@ if __name__ == "__main__":
 
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
+
+
+def test_creature_parser_current_wiki_fields():
+    """TibiaWiki renamed fields (fireDmgMod, hab_fire, charm, lootMuitoRaro...)."""
+    content = read_fixture("dragon_current.txt")
+    result = creatures.parse(12345, content)
+    assert result is not None
+    assert result["fire_mod"] == 0
+    assert result["ice_mod"] == 110
+    assert result["earth_mod"] == 20
+    assert result["charm_points"] == 25
+    assert result["occurrence"] == "comum"
+    assert result["difficulty"] == "médio"
+    assert "Wave" in result["hab_fire"]
+    assert "Corpo a corpo" in result["hab_physical"]
+    assert result["loot_very_rare"]
+
+
+def test_extract_infobox_unbalanced_reads_until_end():
+    """A page missing a closing }} still yields its fields (MediaWiki is lenient too)."""
+    content = "{{Infobox_Quest|List={{{1|}}}\n| name = Broken Quest\n| level = 50\n| spoiler = {{Spoiler|texto"
+    result = extract_infobox(content, "Infobox_Quest")
+    assert result is not None
+    assert result["name"] == "Broken Quest"
+    assert result["level"] == "50"
+
+
+def test_parser_uses_page_title_when_name_missing():
+    content = read_fixture("hunt_current.txt")
+    assert hunts.parse(1, content) is None
+    result = hunts.parse(1, content, title="Ab'Dendriel Elf Cave")
+    assert result["name"] == "Ab'Dendriel Elf Cave"
+
+
+def test_hunt_parser_current_wiki_fields():
+    result = hunts.parse(1, read_fixture("hunt_current.txt"), title="Ab'Dendriel Elf Cave")
+    assert result["level"] == 25
+    assert result["difficulty"] == 2
+    assert result["loot_rating"] == 2
+    assert result["exp_rating"] == 2
+    assert "Knight" in result["vocation"]
+    assert "Yellow Gem" in result["rare_items"]
+    assert result["map_coords"] == "32643,31617,7:1"
+
+
+def test_achievement_parser_current_wiki_fields():
+    result = achievements.parse(1, read_fixture("achievement_current.txt"))
+    assert result["identifier"] == 550
+    assert result["grade"] == 1
+    assert result["points"] == 2
+    assert result["obtainable"] is True
+    assert result["secret"] is True
+    assert "Captive Forest Fury" in result["description"]
+
+
+def test_unmapped_fields_keeps_everything_the_parser_ignores():
+    raw = extract_infobox(read_fixture("hunt_current.txt"), "Infobox_Hunts")
+    extra = unmapped_fields(raw, hunts.FIELD_MAP)
+    assert "infolocal" in extra
+    assert "lvl" not in extra          # mapped to level
+    assert all(v for v in extra.values())  # empty values are dropped
+
+
+def test_creature_single_loot_field_is_split_by_rarity():
+    """~half the creatures now list all loot in one field with rarity notes."""
+    content = (
+        "{{Infobox_Criatura|List={{{1|}}}\n| name = Morguthis\n"
+        "| loot = 0-221 [[Gold Coin]]s, 0-3 [[Assassin Star]]s, [[Knight Axe]], "
+        "[[Demonbone Amulet]] (muito raro), [[Mini Mummy]] (muito raro), "
+        "[[Black Pearl]] (raro), [[Ruby Necklace]] (semi-raro), "
+        "[[Small Ruby]] (incomum), [[Sword Hilt]] (sempre).\n}}"
+    )
+    result = creatures.parse(1, content)
+    assert "Gold Coins" in result["loot_common"]
+    assert "Knight Axe" in result["loot_common"]
+    assert "Sword Hilt" in result["loot_common"]
+    assert result["loot_very_rare"] == "Demonbone Amulet, Mini Mummy"
+    assert result["loot_rare"] == "Black Pearl"
+    assert result["loot_semi_rare"] == "Ruby Necklace"
+    assert result["loot_uncommon"] == "Small Ruby"
+
+
+def test_creature_loot_none_and_tiered_fields_untouched():
+    content = "{{Infobox_Criatura\n| name = X\n| loot = Nenhum.\n}}"
+    result = creatures.parse(1, content)
+    assert not result.get("loot_common")
+    dragon = creatures.parse(1, read_fixture("dragon_current.txt"))
+    assert "Dragon Ham" in dragon["loot_common"]

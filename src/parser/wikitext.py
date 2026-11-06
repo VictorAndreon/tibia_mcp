@@ -48,8 +48,10 @@ def extract_infobox(content, template_name):
             i += 1
 
     if depth != 0:
-        logger.warning("Unbalanced braces in template %s", template_name)
-        return None
+        # Missing closing }} in the source page: MediaWiki renders up to the
+        # end of the page, so read until there instead of dropping the page.
+        logger.warning("Unbalanced braces in template %s, reading until end of page", template_name)
+        i = len(content)
 
     # Extract the content between the opening {{ and closing }}
     inner = content[match.end():i]
@@ -78,6 +80,17 @@ def extract_infobox(content, template_name):
         result[key] = value
 
     return result
+
+
+def unmapped_fields(raw, field_map):
+    """Return the non-empty infobox fields that a parser's FIELD_MAP ignores.
+
+    Stored as extra_fields so wiki data is never lost, even when TibiaWiki
+    renames or adds fields the parser does not know yet.
+    """
+    if not raw:
+        return {}
+    return {k: v for k, v in raw.items() if k not in field_map and v and v.strip()}
 
 
 _HTML_PIPE_OPEN = re.compile(r'<(gallery|tabber|tabview)\b[^>]*>', re.IGNORECASE)

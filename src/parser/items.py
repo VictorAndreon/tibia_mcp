@@ -101,7 +101,7 @@ PRIMARY_TYPE_TO_BODY_POSITION = {
 }
 
 
-def parse(page_id, content):
+def parse(page_id, content, title=None):
     raw = extract_infobox(content, TEMPLATE)
     if not raw:
         return None
@@ -127,6 +127,10 @@ def parse(page_id, content):
     # Derive body_position from primary_type if not explicitly set
     if not record.get("body_position") and record.get("primary_type"):
         record["body_position"] = PRIMARY_TYPE_TO_BODY_POSITION.get(record["primary_type"])
+
+    # Many pages omit "name" and rely on the page title (e.g. most hunts)
+    if not record.get("name") and title:
+        record["name"] = title
 
     if "name" not in record or not record["name"]:
         return None

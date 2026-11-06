@@ -28,13 +28,25 @@ FIELD_MAP = {
     "implemented": "implemented",
     "notas": "notes",
     "notes": "notes",
+
+    # Current TibiaWiki field names
+    "modificador": "modifier",
+    "aplicavel": "applicable_to",
+    "duração": "duration",
+    "imbuementclass": "imbuement_class",
+    "efeitobasic": "effect_basic",
+    "efeitointricate": "effect_intricate",
+    "efeitopowerful": "effect_powerful",
+    "qtditembasic": "item_basic_qty",
+    "qtditemintricate": "item_intricate_qty",
+    "qtditempowerful": "item_powerful_qty",
 }
 
 INT_FIELDS = {"item_basic_qty", "item_intricate_qty", "item_powerful_qty"}
 CLEAN_FIELDS = {"applicable_to", "item_basic", "item_intricate", "item_powerful", "notes"}
 
 
-def parse(page_id, content):
+def parse(page_id, content, title=None):
     raw = extract_infobox(content, TEMPLATE)
     if not raw:
         return None
@@ -52,6 +64,10 @@ def parse(page_id, content):
             record[col] = clean_wikilinks(value) if value else None
         else:
             record[col] = value.strip() if value else None
+
+    # Many pages omit "name" and rely on the page title (e.g. most hunts)
+    if not record.get("name") and title:
+        record["name"] = title
 
     if "name" not in record or not record["name"]:
         return None
