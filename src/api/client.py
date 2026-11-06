@@ -23,7 +23,7 @@ class WikiClient:
 
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (compatible; TibiaWikiDownloader/1.0; Python/requests)",
+            "User-Agent": "TibiaMCP/1.0 (personal use; https://github.com/miltonhit/tibia_mcp)",
         })
 
         retry_strategy = Retry(
