@@ -10,10 +10,13 @@ import logging
 import os
 
 from mcp.server.fastmcp import FastMCP
+import re
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from src.config import DATABASE_URL
+from src.parser.wikitext import clean_wikilinks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,7 +25,9 @@ mcp = FastMCP("TibiaWiki", host=os.getenv("MCP_HOST", "127.0.0.1"), instructions
 You have access to a comprehensive TibiaWiki database (tibiawiki.com.br).
 Covers ALL Tibia MMORPG content: creatures, items, spells, NPCs, quests,
 achievements, mounts, outfits, imbuements, hunts, books, buildings, worlds,
-runes, world quests, world changes, familiars, tasks, updates, fansites.
+runes, world quests, world changes, familiars, tasks, updates, fansites,
+plus every other infobox type (other_infoboxes: objects, perks, ...) and the
+full text of ALL ~19,000 wiki pages (guides, cities, mechanics).
 
 ## HOW TO USE (follow this workflow):
 
@@ -62,6 +67,11 @@ runes, world quests, world changes, familiars, tasks, updates, fansites.
 8. RANK & EXPLORE:
    -> rank_entities(type, sort_by) - top items by price, strongest creatures, best armor, etc.
 
+9. FULL WIKI PAGES (anything not covered by the tables above):
+   -> search_wiki(query) - full-text search over every wiki page
+   -> read_wiki_page(title) - read a page's full text (quest walkthroughs,
+      city guides, game mechanics), paginated with offset
+
 IMPORTANT: ALWAYS start with compact search. Only get_entity for 1-2 specific
 entities. Never request full details on broad queries — it wastes context.
 
@@ -79,6 +89,8 @@ entities. Never request full details on broad queries — it wastes context.
 - items.sell_to contains NPC names, NOT a price column.
 - npc_trades view has ~43 rows (very incomplete). Use items.npc_value directly for prices.
 - Creature _mod columns are percentages: 100=normal, >100=weak, 0=immune.
+- extra_fields (JSONB) holds wiki fields without a dedicated column; check it
+  in get_entity() before saying some data does not exist.
 """)
 
 
@@ -98,7 +110,8 @@ def _query(sql, params=None, limit=20):
             else:
                 cur.execute(sql)
             rows = cur.fetchmany(limit)
-            return [dict(r) for r in rows]
+            # search_vector is an index aid, never useful in a tool response
+            return [{k: v for k, v in r.items() if k != "search_vector"} for r in rows]
     finally:
         conn.close()
 
@@ -158,6 +171,7 @@ COMPACT_COLUMNS = {
     "tasks": ["name", "reward", "location", "level"],
     "updates": ["name", "update_version"],
     "fansites": ["name", "fansite_type", "language"],
+    "other_infoboxes": ["name", "template"],
 }
 
 ALL_ENTITY_TABLES = list(COMPACT_COLUMNS.keys())
@@ -434,7 +448,8 @@ def search(query: str, entity_type: str = "", detail: bool = False,
         entity_type: Filter to specific type. Empty = search all types.
             Options: creatures, items, spells, npcs, quests, achievements,
             mounts, hunts, books, buildings, worlds, runes, world_quests,
-            world_changes, familiars, tasks, updates, fansites
+            world_changes, familiars, tasks, updates, fansites,
+            other_infoboxes (objects, perks and other infobox types)
         detail: False=compact (default), True=full details
         limit: Max results per type (default 10, max 50)
         offset: Skip N results for pagination
@@ -458,10 +473,18 @@ def search(query: str, entity_type: str = "", detail: bool = False,
                 f"ts_rank(search_vector, plainto_tsquery('simple', %s)) AS relevance "
                 f"FROM {table} "
                 f"WHERE search_vector @@ plainto_tsquery('simple', %s) "
-                f"ORDER BY relevance DESC LIMIT %s OFFSET %s",
-                (query, query, per_table_limit, offset),
+                f"ORDER BY (lower(name) = lower(%s)) DESC, relevance DESC LIMIT %s OFFSET %s",
+                (query, query, query, per_table_limit, offset),
                 limit=per_table_limit,
             )
+            if not rows:
+                # FTS matches whole words only; keep partial names working ("drag")
+                rows = _query(
+                    f"SELECT {cols} FROM {table} "
+                    f"WHERE name ILIKE %s ORDER BY name LIMIT %s OFFSET %s",
+                    (f"%{query}%", per_table_limit, offset),
+                    limit=per_table_limit,
+                )
         else:
             rows = _query(
                 f"SELECT {cols} FROM {table} "
@@ -756,8 +779,9 @@ def recommend_hunt(level: int, vocation: str = "", compact: bool = True) -> str:
     params = [level + 50, max(1, level - 30)]
 
     if vocation:
-        conditions.append("(vocation ILIKE %s OR vocation ILIKE '%all%' OR vocation IS NULL)")
-        params.append(f"%{vocation}%")
+        # '%all%' must be a parameter: a literal % in the SQL breaks psycopg2 formatting
+        conditions.append("(vocation ILIKE %s OR vocation ILIKE %s OR vocation IS NULL)")
+        params.extend([f"%{vocation}%", "%all%"])
 
     where = " AND ".join(conditions)
 
@@ -1227,7 +1251,12 @@ def query_database(sql_query: str) -> str:
 
     Other tables: achievements, mounts, outfits, imbuements, books, buildings,
     worlds, runes, world_quests, world_changes, familiars, tasks, updates, fansites.
-    Most have: name, page_id, tags[], summary, notes.
+    Most have: name, page_id, tags[], summary, notes,
+      extra_fields JSONB (wiki fields without a column, e.g. extra_fields->>'perk1').
+
+    other_infoboxes: page_id, template TEXT (e.g. 'infobox_object', 'infobox_perk_option'),
+      name TEXT, fields JSONB (all infobox fields)
+    raw_pages: page_id, title, content TEXT (raw wikitext of EVERY page), is_redirect
 
     EXAMPLE QUERIES:
       Most expensive items: SELECT name, npc_value FROM items WHERE npc_value IS NOT NULL ORDER BY npc_value DESC LIMIT 20
@@ -1246,18 +1275,101 @@ def query_database(sql_query: str) -> str:
         sql_query: A SELECT SQL query (read-only, max 30 results)
     """
     cleaned = sql_query.strip().upper()
-    if not cleaned.startswith("SELECT"):
+    if not cleaned.startswith(("SELECT", "WITH")):
         return "Error: Only SELECT queries are allowed."
 
-    for keyword in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE"):
-        if keyword in cleaned:
-            return f"Error: {keyword} is not allowed. Only SELECT queries."
-
+    # The database enforces read-only; a keyword blacklist rejected valid
+    # queries like "SELECT * FROM updates" and could not stop writes anyway.
+    conn = _get_conn()
     try:
-        rows = _query(sql_query, limit=30)
+        conn.set_session(readonly=True)
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '10s'")
+            cur.execute(sql_query)
+            rows = [{k: v for k, v in r.items() if k != "search_vector"} for r in cur.fetchmany(30)]
         return _format(rows)
     except Exception as e:
         return f"Query error: {e}"
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+_REDIRECT_RE = re.compile(r"^#\S+\s*\[\[([^\]|#]+)", re.IGNORECASE)
+
+
+@mcp.tool()
+def search_wiki(query: str, limit: int = 10, offset: int = 0) -> str:
+    """Full-text search over EVERY TibiaWiki page, not only parsed entities.
+
+    Use for anything the entity tables do not cover: quest walkthroughs,
+    city guides, game mechanics, events, lore. Then read_wiki_page(title).
+
+    Args:
+        query: Search keywords (e.g. "blessing", "Yalahar quest", "imbuing")
+        limit: Max results (default 10, max 30)
+        offset: Skip N results for pagination
+    """
+    limit = min(limit, 30)
+    rows = _query(
+        "SELECT title, ts_headline('simple', content, plainto_tsquery('simple', %s), "
+        "'MaxWords=30, MinWords=10, MaxFragments=1') AS snippet "
+        "FROM raw_pages WHERE search_vector @@ plainto_tsquery('simple', %s) "
+        "ORDER BY ts_rank(search_vector, plainto_tsquery('simple', %s)) DESC "
+        "LIMIT %s OFFSET %s",
+        (query, query, query, limit, offset),
+        limit=limit,
+    )
+    if not rows:
+        rows = _query(
+            "SELECT title, left(content, 200) AS snippet FROM raw_pages "
+            "WHERE NOT is_redirect AND title ILIKE %s ORDER BY title LIMIT %s OFFSET %s",
+            (f"%{query}%", limit, offset),
+            limit=limit,
+        )
+    if not rows:
+        return f"No wiki pages found for '{query}'."
+    return _format(rows)
+
+
+@mcp.tool()
+def read_wiki_page(title: str, offset: int = 0, max_chars: int = 8000) -> str:
+    """Read the full text of a TibiaWiki page by title (follows redirects).
+
+    Long pages are paginated: the response says the next offset to use.
+
+    Args:
+        title: Page title, exact or partial (e.g. "Blessings", "Thais")
+        offset: Character offset to start from (for long pages)
+        max_chars: Max characters to return (default 8000, max 20000)
+    """
+    max_chars = min(max_chars, 20000)
+    page = None
+    for _ in range(3):  # follow up to 3 redirects
+        rows = _query(
+            "SELECT title, content FROM raw_pages WHERE title ILIKE %s "
+            "ORDER BY CASE WHEN title ILIKE %s THEN 0 ELSE 1 END, length(title) LIMIT 1",
+            (f"%{title}%", title),
+            limit=1,
+        )
+        if not rows:
+            break
+        page = rows[0]
+        target = _REDIRECT_RE.match(page["content"] or "")
+        if not target:
+            break
+        title = target.group(1).strip()
+
+    if not page:
+        return f"No wiki page found matching '{title}'. Try search_wiki()."
+
+    text = re.sub(r"<!--.*?-->", "", page["content"] or "", flags=re.S)
+    text = clean_wikilinks(text)
+    chunk = text[offset:offset + max_chars]
+    result = {"title": page["title"], "total_chars": len(text), "offset": offset, "text": chunk}
+    if offset + max_chars < len(text):
+        result["next_offset"] = offset + max_chars
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
