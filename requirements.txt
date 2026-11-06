@@ -1,7 +1,7 @@
 psycopg2-binary==2.9.9
 requests==2.31.0
 python-dotenv==1.0.1
-mcp>=1.0.0
+mcp>=1.0.0,<2
 
 # Optional: semantic search with LlamaIndex (uncomment to enable)
 # llama-index
