@@ -4,8 +4,12 @@ Downloads all content from TibiaWiki via MediaWiki API,
 parses infobox templates, and imports into PostgreSQL.
 """
 
+import collections
 import logging
+import re
 import sys
+
+from psycopg2.extras import Json, execute_values
 
 from src.api.client import WikiClient
 from src.api.paginator import iter_all_pages
@@ -18,7 +22,7 @@ from src.parser import (
     imbuements, hunts, books, buildings, worlds, runes, world_quests,
     world_changes, familiars, tasks, updates, fansites,
 )
-from src.parser.wikitext import extract_map_coords
+from src.parser.wikitext import extract_infobox, extract_map_coords, unmapped_fields
 from src.tagger import generate_tags, generate_summary
 
 logging.basicConfig(
@@ -121,8 +125,8 @@ def phase_parse_and_import():
 
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT page_id, content FROM raw_pages "
-                    "WHERE NOT is_redirect AND (content LIKE %s OR content LIKE %s)",
+                    "SELECT page_id, title, content FROM raw_pages "
+                    "WHERE NOT is_redirect AND (content ILIKE %s OR content ILIKE %s)",
                     (search_pattern1, search_pattern2),
                 )
                 pages = cur.fetchall()
@@ -131,24 +135,84 @@ def phase_parse_and_import():
 
             records = []
             errors = 0
+            ignored = collections.Counter()
             for page in pages:
                 try:
-                    record = parser_module.parse(page["page_id"], page["content"])
+                    record = parser_module.parse(page["page_id"], page["content"], title=page["title"])
                     if record:
+                        raw = extract_infobox(page["content"], template_name)
+                        extra = unmapped_fields(raw, parser_module.FIELD_MAP)
+                        ignored.update(extra.keys())
+                        record["extra_fields"] = Json(extra) if extra else None
                         records.append(record)
                 except Exception as e:
                     errors += 1
                     logger.warning("Parse error for page_id=%d: %s", page["page_id"], e)
 
             if records:
-                upsert_parsed_records(conn, table, records, columns)
+                upsert_parsed_records(conn, table, records, columns + ["extra_fields"])
 
             logger.info("Parsed %s: %d records, %d errors", table, len(records), errors)
+            if ignored:
+                # Kept in extra_fields; a field showing up here for most records
+                # usually means TibiaWiki renamed it and FIELD_MAP needs an alias.
+                logger.info("  %s fields kept only in extra_fields: %s", table,
+                            ", ".join(f"{k}({n})" for k, n in ignored.most_common(10)))
 
     finally:
         conn.close()
 
     logger.info("Phase 2 complete")
+
+
+INFOBOX_RE = re.compile(r"\{\{\s*(Infobox[ _][^|{}\n/]+?)\s*\|", re.IGNORECASE)
+
+
+def _template_key(name):
+    return name.strip().replace(" ", "_").lower()
+
+
+def phase_other_infoboxes():
+    """Phase 2b: Keep infobox types that have no dedicated parser (Infobox_Object, ...)."""
+    logger.info("=== PHASE 2b: Importing infoboxes without a dedicated parser ===")
+
+    known = {_template_key(t) for t, _ in PARSERS}
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT page_id, title, content FROM raw_pages WHERE NOT is_redirect")
+            pages = cur.fetchall()
+
+        rows = {}
+        per_template = collections.Counter()
+        for page in pages:
+            for template in {m.strip() for m in INFOBOX_RE.findall(page["content"] or "")}:
+                key = _template_key(template)
+                if key in known or (page["page_id"], key) in rows:
+                    continue
+                raw = extract_infobox(page["content"], template)
+                if not raw:
+                    continue
+                fields = {k: v for k, v in raw.items() if v and v.strip()}
+                name = fields.get("name") or page["title"]
+                rows[(page["page_id"], key)] = (page["page_id"], key, name, Json(fields))
+                per_template[key] += 1
+
+        if rows:
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    "INSERT INTO other_infoboxes (page_id, template, name, fields) VALUES %s "
+                    "ON CONFLICT (page_id, template) DO UPDATE SET "
+                    "name = EXCLUDED.name, fields = EXCLUDED.fields",
+                    list(rows.values()),
+                )
+            conn.commit()
+
+        logger.info("Phase 2b complete: %d records (%s)", len(rows),
+                    ", ".join(f"{t}={n}" for t, n in per_template.most_common()))
+    finally:
+        conn.close()
 
 
 def phase_extract_positions():
@@ -278,6 +342,67 @@ def phase_generate_tags():
     logger.info("Phase 4 complete")
 
 
+def _text_expr(conn, table, exclude):
+    """SQL expression concatenating every text-like column of a table."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_name = %s ORDER BY ordinal_position",
+            (table,),
+        )
+        cols = cur.fetchall()
+
+    parts = []
+    for col in cols:
+        name, dtype = col["column_name"], col["data_type"]
+        if name in exclude:
+            continue
+        if dtype in ("text", "character varying"):
+            parts.append(f'"{name}"')
+        elif dtype == "jsonb":
+            parts.append(f'"{name}"::text')
+        elif dtype == "ARRAY":
+            parts.append(f'array_to_string("{name}", \' \')')
+    return "concat_ws(' ', " + ", ".join(parts) + ")" if parts else "''"
+
+
+def phase_refresh_search_vectors():
+    """Phase 4b: Rebuild full-text vectors now that the tables have data.
+
+    The vectors used to be filled only inside migrations, which run before
+    any data exists, so search() matched nothing on most tables.
+    """
+    logger.info("=== PHASE 4b: Refreshing search vectors ===")
+
+    conn = get_connection()
+    try:
+        tables = [p.TABLE for _, p in PARSERS] + ["other_infoboxes"]
+        for table in tables:
+            rest = _text_expr(conn, table, exclude={"name", "search_vector"})
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {table} SET search_vector = "
+                    f"setweight(to_tsvector('simple', coalesce(name, '')), 'A') || "
+                    f"setweight(to_tsvector('simple', {rest}), 'D')"
+                )
+            conn.commit()
+            logger.info("Search vectors refreshed: %s", table)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE raw_pages SET search_vector = "
+                "setweight(to_tsvector('simple', title), 'A') || "
+                "setweight(to_tsvector('simple', coalesce(content, '')), 'D') "
+                "WHERE NOT is_redirect"
+            )
+        conn.commit()
+        logger.info("Search vectors refreshed: raw_pages")
+    finally:
+        conn.close()
+
+    logger.info("Phase 4b complete")
+
+
 MATERIALIZED_VIEWS = ["creature_drops", "npc_trades", "hunt_creatures", "quest_bosses"]
 
 
@@ -333,12 +458,14 @@ def main():
 
     # Phase 2: Parse and import
     phase_parse_and_import()
+    phase_other_infoboxes()
 
     # Phase 3: Extract positions from parsed content
     phase_extract_positions()
 
     # Phase 4: Generate tags and summaries
     phase_generate_tags()
+    phase_refresh_search_vectors()
 
     # Phase 5: Refresh materialized views (for cross-entity queries)
     phase_refresh_views()
@@ -362,6 +489,9 @@ def main():
                 cur.execute(f"SELECT count(*) as cnt FROM {table}")
                 count = cur.fetchone()["cnt"]
                 logger.info("  %s: %d records", table, count)
+
+            cur.execute("SELECT count(*) as cnt FROM other_infoboxes")
+            logger.info("  other_infoboxes: %d records", cur.fetchone()["cnt"])
 
             cur.execute("SELECT count(*) as cnt FROM positions")
             pos_count = cur.fetchone()["cnt"]
